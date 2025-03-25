@@ -40,33 +40,44 @@ export function setupStarField(canvas) {
   // Shooting star settings
   const shootingStars = []
   
-  // Star types (pixel art style)
+  // Optimize star types - avoid creating rgba strings repeatedly
+  // Pre-define a set of alpha values we'll use
+  const alphaCache = {};
+  function getCachedStyle(alpha) {
+    // Round to 2 decimal places to limit cache size
+    const roundedAlpha = Math.round(alpha * 100) / 100;
+    if (!alphaCache[roundedAlpha]) {
+      alphaCache[roundedAlpha] = `rgba(255, 255, 255, ${roundedAlpha})`;
+    }
+    return alphaCache[roundedAlpha];
+  }
+  
   const starTypes = [
     // 1x1 pixel
     { 
       size: 1,
       draw: (x, y, alpha) => {
-        ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`
-        ctx.fillRect(Math.floor(x), Math.floor(y), 1, 1)
+        ctx.fillStyle = getCachedStyle(alpha);
+        ctx.fillRect(Math.floor(x), Math.floor(y), 1, 1);
       }
     },
     // 2x2 pixel
     { 
       size: 2,
       draw: (x, y, alpha) => {
-        ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`
-        ctx.fillRect(Math.floor(x), Math.floor(y), 2, 2)
+        ctx.fillStyle = getCachedStyle(alpha);
+        ctx.fillRect(Math.floor(x), Math.floor(y), 2, 2);
       }
     },
     // Plus shape (+)
     { 
       size: 3,
       draw: (x, y, alpha) => {
-        const fx = Math.floor(x)
-        const fy = Math.floor(y)
-        ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`
-        ctx.fillRect(fx, fy + 1, 3, 1) // Horizontal line
-        ctx.fillRect(fx + 1, fy, 1, 3) // Vertical line
+        const fx = Math.floor(x);
+        const fy = Math.floor(y);
+        ctx.fillStyle = getCachedStyle(alpha);
+        ctx.fillRect(fx, fy + 1, 3, 1); // Horizontal line
+        ctx.fillRect(fx + 1, fy, 1, 3); // Vertical line
       }
     }
   ]
@@ -159,125 +170,204 @@ export function setupStarField(canvas) {
     }
   }
   
-  // Draw shooting stars
+  // Draw shooting stars - optimized version
   function drawShootingStars() {
-    shootingStars.forEach(star => {
-      // Get horizon fade factor for the star head position
-      const headFadeFactor = getFadeFactor(star.y)
+    // Limit shimmer pixel generation to save performance
+    const maxShimmerPixels = 200;
+    
+    // Use standard for loop instead of forEach
+    const shootingStarsLen = shootingStars.length;
+    for (let starIdx = 0; starIdx < shootingStarsLen; starIdx++) {
+      const star = shootingStars[starIdx];
       
-      // If the star is beyond the fade horizon, skip drawing
-      if (headFadeFactor <= 0.01) return
-      
-      // Calculate lifecycle-based alpha
-      // Stars start dim, brighten in the middle, and fade at the end
-      const introPhase = 0.15; // First 15% of travel
-      const outroPhase = 0.7;  // After 70% of travel
-      
-      let lifecycleFactor = 1.0;
-      const progress = star.distanceTraveled / star.maxTravel;
-      
-      if (progress < introPhase) {
-        // Fade in - start at 0, ramp up to 1
-        lifecycleFactor = progress / introPhase;
-      } else if (progress > outroPhase) {
-        // Fade out - start at 1, decrease to 0
-        lifecycleFactor = 1.0 - ((progress - outroPhase) / (1.0 - outroPhase));
+      // Fast inline fade factor calculation for head
+      let headFadeFactor = 1.0;
+      if (star.y >= fadeStartY) {
+        if (star.y > fadeEndY) {
+          continue; // Skip completely faded stars
+        }
+        headFadeFactor = 1.0 - ((star.y - fadeStartY) / fadeRange);
       }
       
-      // Current alpha based on lifecycle and max brightness
+      // Early exit if not visible
+      if (headFadeFactor <= 0.01) continue;
+      
+      // Calculate lifecycle-based alpha - simplified calculation
+      let lifecycleFactor;
+      const progress = star.distanceTraveled / star.maxTravel;
+      
+      if (progress < 0.15) {
+        // Fade in
+        lifecycleFactor = progress / 0.15;
+      } else if (progress > 0.7) {
+        // Fade out
+        lifecycleFactor = 1.0 - ((progress - 0.7) / 0.3);
+      } else {
+        // Middle - fully visible
+        lifecycleFactor = 1.0;
+      }
+      
+      // Current alpha
       const currentAlpha = star.maxAlpha * lifecycleFactor;
       
-      // Draw the shooting star with a pixel art style tail
-      const tailLength = Math.floor(star.tailLength)
-      const startX = Math.floor(star.x)
-      const startY = Math.floor(star.y)
+      // Calculate star drawing parameters
+      const tailLength = Math.floor(star.tailLength);
+      const startX = Math.floor(star.x);
+      const startY = Math.floor(star.y);
       
-      // Define normalized direction vector for pixel-perfect drawing
-      const length = Math.sqrt(star.vx * star.vx + star.vy * star.vy)
-      const dx = star.vx / length
-      const dy = star.vy / length
+      // Calculate direction once
+      const vSqrLen = star.vx * star.vx + star.vy * star.vy;
+      const length = Math.sqrt(vSqrLen);
+      const dx = star.vx / length;
+      const dy = star.vy / length;
       
-      // Draw tail pixels with fading alpha
+      // Optimize shimmer pixel generation - only add new ones if we're below limit
+      const shouldAddShimmer = star.shimmerPixels.length < maxShimmerPixels;
+      
+      // Draw tail with batch styling
+      let lastAlpha = -1;
+      
+      // Draw tail pixels
       for (let i = 0; i < tailLength; i++) {
+        // Optimization: only draw every other pixel for long tails
+        if (tailLength > 20 && i % 2 !== 0 && i < tailLength * 0.7) continue;
+        
         // Calculate position
-        const x = Math.floor(startX - dx * i)
-        const y = Math.floor(startY - dy * i)
+        const x = Math.floor(startX - dx * i);
+        const y = Math.floor(startY - dy * i);
         
-        // Get horizon fade factor for this tail segment
-        const tailFadeFactor = getFadeFactor(y)
+        // Fast inline fade calculation
+        let tailFadeFactor = 1.0;
+        if (y >= fadeStartY) {
+          if (y > fadeEndY) {
+            continue; // Skip this pixel
+          }
+          tailFadeFactor = 1.0 - ((y - fadeStartY) / fadeRange);
+        }
         
-        // Calculate alpha (fading toward the end of the tail)
-        const pixelAlpha = currentAlpha * (1 - i / tailLength) * tailFadeFactor
+        // Calculate alpha
+        const tailFade = 1 - i / tailLength;
+        const pixelAlpha = currentAlpha * tailFade * tailFadeFactor;
         
-        // Only draw if alpha is visible
+        // Only draw visible pixels
         if (pixelAlpha > 0.05) {
-          ctx.fillStyle = `rgba(255, 255, 255, ${pixelAlpha})`
-          ctx.fillRect(x, y, 1, 1) // 1px wide pixel
+          // Only change fill style if the alpha changed significantly
+          // This reduces expensive ctx.fillStyle calls
+          if (Math.abs(pixelAlpha - lastAlpha) > 0.05) {
+            ctx.fillStyle = getCachedStyle(pixelAlpha);
+            lastAlpha = pixelAlpha;
+          }
           
-          // Create many more shimmer pixels, especially at the end of the tail
-          // This creates the effect of pixels lingering after the star passes
-          const tailEndSection = i > (tailLength * 0.6); // Last 40% of the tail
+          ctx.fillRect(x, y, 1, 1);
           
-          // Much higher chance of shimmer pixels - especially at the end of the tail
-          if (Math.random() < (tailEndSection ? 0.4 : 0.08)) {
-            // Add a pixel to the shimmer array that will persist
-            star.shimmerPixels.push({
-              x: x,
-              y: y,
-              alpha: pixelAlpha * (tailEndSection ? 1.2 : 0.9), // Brighter at the end
-              decay: Math.random() < 0.5 ? 0.985 : 0.97 // Much slower decay for more visible lingering
-            });
+          // Optimize shimmer pixel generation - use deterministic approach
+          // Only add new shimmer pixels if we're below the limit
+          if (shouldAddShimmer) {
+            const tailEndSection = i > (tailLength * 0.6);
+            
+            // Use time-based value instead of random for performance
+            const shimmerSeed = (x * 0.1 + y * 0.2) % 1.0;
+            if (shimmerSeed < (tailEndSection ? 0.2 : 0.04)) {
+              // Add shimmer pixel
+              star.shimmerPixels.push({
+                x: x,
+                y: y,
+                alpha: pixelAlpha * (tailEndSection ? 1.2 : 0.9),
+                decay: shimmerSeed < 0.5 ? 0.985 : 0.97
+              });
+            }
           }
         }
       }
       
-      // Draw shimmer pixels
-      if (star.shimmerPixels && star.shimmerPixels.length > 0) {
-        for (const pixel of star.shimmerPixels) {
-          const shimmerFadeFactor = getFadeFactor(pixel.y);
-          const finalAlpha = pixel.alpha * shimmerFadeFactor;
+      // Draw shimmer pixels - batch by alpha for performance
+      if (star.shimmerPixels.length > 0) {
+        // Map of alpha values to arrays of pixels with that alpha
+        const alphaGroups = {};
+        
+        // Group pixels by alpha (rounded to 2 decimal places)
+        for (let i = 0; i < star.shimmerPixels.length; i++) {
+          const pixel = star.shimmerPixels[i];
+          // Fast inline fade calculation
+          let shimmerFadeFactor = 1.0;
+          if (pixel.y >= fadeStartY) {
+            if (pixel.y > fadeEndY) {
+              continue; // Skip this pixel
+            }
+            shimmerFadeFactor = 1.0 - ((pixel.y - fadeStartY) / fadeRange);
+          }
           
+          const finalAlpha = pixel.alpha * shimmerFadeFactor;
           if (finalAlpha > 0.02) {
-            ctx.fillStyle = `rgba(255, 255, 255, ${finalAlpha})`;
+            // Round to 2 decimal places
+            const roundedAlpha = Math.round(finalAlpha * 100) / 100;
+            if (!alphaGroups[roundedAlpha]) {
+              alphaGroups[roundedAlpha] = [];
+            }
+            alphaGroups[roundedAlpha].push(pixel);
+          }
+        }
+        
+        // Draw pixels grouped by alpha
+        for (const alpha in alphaGroups) {
+          ctx.fillStyle = getCachedStyle(parseFloat(alpha));
+          const pixels = alphaGroups[alpha];
+          for (let i = 0; i < pixels.length; i++) {
+            const pixel = pixels[i];
             ctx.fillRect(pixel.x, pixel.y, 1, 1);
           }
         }
       }
       
-      // Draw the star "head" as a plus sign (+)
-      const headAlpha = currentAlpha * headFadeFactor
+      // Draw star head
+      const headAlpha = currentAlpha * headFadeFactor;
       if (headAlpha > 0.05) {
-        ctx.fillStyle = `rgba(255, 255, 255, ${headAlpha})`
+        ctx.fillStyle = getCachedStyle(headAlpha);
         // Horizontal line
-        ctx.fillRect(startX - 1, startY, 3, 1)
+        ctx.fillRect(startX - 1, startY, 3, 1);
         // Vertical line
-        ctx.fillRect(startX, startY - 1, 1, 3)
+        ctx.fillRect(startX, startY - 1, 1, 3);
       }
-    })
+    }
   }
   
-  // Draw the stars on the canvas
+  // Pre-calculate some values used in drawing
+  const fadeStartY = canvasDisplayHeight * 0.1;
+  const fadeEndY = canvasDisplayHeight * 0.99;
+  const fadeRange = fadeEndY - fadeStartY;
+  
+  // Draw the stars on the canvas - optimized for performance
   function drawStars() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    // Clear canvas - this is faster than fillRect
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // Draw background stars
-    stars.forEach(star => {
-      // Calculate base brightness
-      let alpha = 0.4 + star.brightness * 0.6;
+    // Pre-compute values needed in the loop to avoid recalculation
+    const starsLen = stars.length;
+    
+    // Use standard for loop instead of forEach (faster)
+    for (let i = 0; i < starsLen; i++) {
+      const star = stars[i];
       
-      // Apply horizon fade effect
-      const fadeFactor = getFadeFactor(star.y);
-      alpha *= fadeFactor;
+      // Optimized inline fade factor calculation
+      let fadeFactor = 1.0;
+      if (star.y >= fadeStartY) {
+        if (star.y > fadeEndY) {
+          continue; // Skip fully faded stars
+        }
+        fadeFactor = 1.0 - ((star.y - fadeStartY) / fadeRange);
+      }
       
-      // Only draw if star is visible
+      // Calculate and apply alpha
+      const alpha = (0.4 + star.brightness * 0.6) * fadeFactor;
+      
+      // Only draw if visible
       if (alpha > 0.01) {
-        // Draw the star using its type
         star.type.draw(star.x, star.y, alpha);
       }
-    })
+    }
     
     // Draw shooting stars on top
-    drawShootingStars()
+    drawShootingStars();
   }
   
   // Create stars using a hybrid approach for natural clustering
@@ -413,25 +503,31 @@ export function setupStarField(canvas) {
     console.log(`Created ${starCount} stars with natural clustering`)
   }
   
-  // Update star properties for animation
+  // Update star properties for animation - optimized version
   function updateStars() {
-    stars.forEach(star => {
-      // Make stars twinkle by changing brightness
-      star.brightness += star.blinkDirection * star.blinkSpeed
+    const now = Date.now();
+    const timeMs = now % 10000; // Cycle every 10 seconds
+    
+    // Use standard for loop (faster than forEach)
+    const starsLen = stars.length;
+    for (let i = 0; i < starsLen; i++) {
+      const star = stars[i];
       
-      // Reverse direction when reaching brightness limits
-      // Using narrower range (0.2-0.9) for more pronounced twinkling
+      star.brightness += star.blinkDirection * star.blinkSpeed;
+      
+      // Clamp brightness to valid range
       if (star.brightness <= 0.2 || star.brightness >= 0.9) {
-        star.blinkDirection *= -1
+        star.blinkDirection *= -1;
         
-        // Small chance to dramatically change brightness to simulate atmospheric flicker
-        // We use Math.random here (not seeded) since we want the twinkling to be different each time
-        if (Math.random() < 0.1) {
-          star.brightness = 0.3 + Math.random() * 0.6; // Random jump in brightness
-          star.blinkSpeed = 0.02 + Math.random() * 0.04; // Randomize speed again
+        // Use a time-based probability instead of full random
+        // This is cheaper and more consistent
+        const flickerValue = (Math.sin(now * 0.001 + i * 0.1) + 1) * 0.5;
+        if (flickerValue < 0.1) {
+          star.brightness = 0.3 + (Math.sin(now * 0.001 + i) + 1) * 0.3;
+          star.blinkSpeed = 0.01 + (Math.cos(now * 0.001 + i) + 1) * 0.01;
         }
       }
-    })
+    }
   }
   
   // Set canvas size to full window
@@ -463,13 +559,42 @@ export function setupStarField(canvas) {
     drawStars()   // Draw them immediately
   }
   
-  // Animation loop
+  // Track whether we're in the viewport
+  let isVisible = true;
+  
+  // Animation loop with optimizations
   function animate() {
-    updateStars()
-    updateShootingStars()
-    drawStars()
-    requestAnimationFrame(animate)
+    // Performance optimization: Only run full updates when tab is visible
+    if (document.visibilityState === 'visible') {
+      // Reset visibility if we were previously hidden
+      if (!isVisible) {
+        isVisible = true;
+        console.log('Starfield animation resumed');
+      }
+      
+      // Standard updates
+      updateStars();
+      updateShootingStars();
+      drawStars();
+    } else {
+      // Reduce CPU usage when tab not visible
+      if (isVisible) {
+        isVisible = false;
+        console.log('Starfield animation paused (tab inactive)');
+      }
+    }
+    
+    // Always request next frame
+    requestAnimationFrame(animate);
   }
+  
+  // Listen for visibility changes to optimize performance
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      // Force a redraw when tab becomes visible again
+      drawStars();
+    }
+  });
   
   // Create a shooting star at regular intervals
   function startShootingStarTimer() {
